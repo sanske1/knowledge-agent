@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>知识库Agent系统</title>
+<link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<!-- 全局布局：左侧导航 + 顶部栏 + 主工作区 -->
+<div id="app">
+  <!-- 左侧导航 -->
+  <aside id="sidebar">
+    <div class="logo">
+      <span class="logo-icon">🧠</span>
+      <span class="logo-text">知识库Agent</span>
+    </div>
+    <nav id="nav-menu">
+      <a class="nav-item" data-route="chat" href="#/chat">
+        <span class="nav-icon">💬</span><span>智能对话</span>
+      </a>
+      <a class="nav-item" data-route="documents" href="#/documents">
+        <span class="nav-icon">📁</span><span>文档中心</span>
+      </a>
+      <a class="nav-item" data-route="search" href="#/search">
+        <span class="nav-icon">🔍</span><span>检索中心</span>
+      </a>
+      <a class="nav-item" data-route="system" href="#/system">
+        <span class="nav-icon">⚙️</span><span>系统管理</span>
+      </a>
+    </nav>
+  </aside>
+
+  <!-- 顶部全局栏 -->
+  <header id="topbar">
+    <div class="breadcrumb" id="breadcrumb">智能对话</div>
+    <div class="topbar-actions">
+      <div class="service-status" id="service-status" title="服务状态">
+        <span class="dot" data-svc="mysql"></span>
+        <span class="dot" data-svc="redis"></span>
+        <span class="dot" data-svc="mcp"></span>
+      </div>
+      <span class="user-info">管理员</span>
+    </div>
+  </header>
+
+  <!-- 主工作区 -->
+  <main id="main-content"></main>
+</div>
+
+<!-- 全局消息提示容器 -->
+<div id="toast-container"></div>
+
+<!-- 确认弹窗 -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-title" id="modal-title">确认</div>
+    <div class="modal-body" id="modal-body">确定执行此操作？</div>
+    <div class="modal-footer">
+      <button class="btn btn-default" id="modal-cancel">取消</button>
+      <button class="btn btn-danger" id="modal-confirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/documents.js"></script>
+<script src="/static/js/search.js"></script>
+<script src="/static/js/system.js"></script>
+</body>
+</html>

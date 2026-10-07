@@ -1,0 +1,24 @@
+# ── 运行时数据：上传的文档与 AI 生成的产物 ──────────────
+# 首次启动由 config.ensure_dirs() 自动创建
+deal_files_data/
+creat_file/
+
+# ── 凭据：真实密钥只放本地 .env，模板见 .env.example ─────
+.env
+
+# ── Python ─────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── IDE ────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+
+# ── 系统 ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db

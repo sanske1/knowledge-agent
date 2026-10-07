@@ -1,0 +1,335 @@
+# 知识库 Agent 系统 —— 项目详细介绍
+
+## 一、项目概述
+
+本项目是一个**基于大语言模型的企业级知识库 Agent 系统**，核心能力是将用户上传的各类文档（PDF、Word、Excel、PPT、纯文本、代码等）经过 AI 加工后，构建成**可语义检索的结构化知识库**，并通过 LangGraph 智能体 + MCP 工具协议对外提供自然语言问答与数据操作能力。
+
+系统采用 **"双文件夹归档 + 三级索引 + 向量检索 + Agent 对话"** 的整体架构，强调数据的**可追溯、可重建、可移植**：MySQL 作为主存真相源，磁盘 `.meta.json` 作为侧录备份，Redis 向量库可随时从 MySQL 全量重建。
+
+---
+
+## 二、技术栈
+
+| 层级 | 技术选型 |
+|------|---------|
+| Web 框架 | FastAPI + Uvicorn |
+| 前端 | 原生 HTML/CSS/JS（单页应用，无构建步骤） |
+| 大语言模型 | DeepSeek（通过 OpenAI 兼容接口 `langchain_openai.ChatOpenAI`） |
+| 向量嵌入 | Ollama `bge-m3:latest`（本地部署，1024 维） |
+| 向量存储 | Redis（`langchain_redis.RedisVectorStore`，RediSearch 向量索引） |
+| 主数据库 | MySQL 8（`pymysql`，`utf8mb4`） |
+| Agent 框架 | LangGraph（`StateGraph` + `ToolNode` + `InMemorySaver`） |
+| MCP 协议 | `langchain-mcp-adapters`（`MultiServerMCPClient`，HTTP transport） |
+| 文档解析 | `python-docx`、`openpyxl`、`pypdf`、`python-pptx`、`olefile`、`win32com`（.doc 兜底） |
+| 配置管理 | 单文件 `config.py`（单源真相，所有路径基于 `__file__` 解析） |
+
+---
+
+## 三、整体架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Web 前端 (web/)                           │
+│           文档管理 / 检索 / 智能对话 / 系统设置                    │
+└───────────────┬─────────────────────────────────────────────────┘
+                │ HTTP REST API
+┌───────────────▼─────────────────────────────────────────────────┐
+│                  FastAPI WebAPI (webapis/app.py)                 │
+│   /api/inbox/*  /api/index/*  /api/search/*  /api/chat/*  /api/mcp│
+└───┬──────────────────┬──────────────────┬───────────────────────┘
+    │                  │                  │
+    ▼                  ▼                  ▼
+┌─────────┐    ┌──────────────┐   ┌──────────────────────┐
+│ deal_files│   │ RedisRAG     │   │ graphchat (LangGraph) │
+│ 入库流水线│   │ 向量检索      │   │  Agent + MCP 工具调用 │
+└────┬─────┘    └──────┬───────┘   └──────────┬───────────┘
+     │                 │                      │
+     ▼                 ▼                      ▼
+┌─────────┐    ┌──────────────┐   ┌──────────────────────┐
+│  MySQL   │    │    Redis     │   │   MCP Server(s)       │
+│ 主存真相源│   │  向量索引库   │   │ (用户自建，HTTP 8889)  │
+└─────────┘    └──────────────┘   └──────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────────┐
+│   磁盘归档 (deal_files_data/已处理/)       │
+│   原始文件 + .meta.json 侧录（备份/可移植） │
+└──────────────────────────────────────────┘
+```
+
+---
+
+## 四、核心模块详解
+
+### 4.1 文件处理流水线 (`AIchat/deal_files/`)
+
+这是系统的数据入口，负责将原始文档转化为可检索的知识库条目。
+
+#### 4.1.1 `loadfile.py` —— 文件识别与读取
+
+**职责边界**：纯 IO 与解析，**不做任何 AI 生成、不做语义加工**。
+
+- **编码检测**：依次尝试 `utf-8 → gbk → gb2312 → utf-16 → latin-1`，无 `chardet` 依赖。
+- **文本类文件**（`.txt/.md/.py/.json/.csv` 等 30+ 后缀）：直接读取，按双换行分段，保留段落边界。
+- **Office 文档**：
+  - `.docx`：`python-docx` 读取段落 + 表格
+  - `.doc`：优先 `win32com`（Word COM 转 docx），失败兜底 `olefile`；并对输出做**乱码质量检测**（可打印字符比例、中文高频字密度），不合格则报错而非存入垃圾数据。
+  - `.pdf`：`pypdf` 逐页提取，保留页码
+  - `.xlsx/.xls`：`openpyxl` 读取单元格
+  - `.pptx`：`python-pptx` 读取文本框
+- **输出**：标准化 `FileRaw` 对象（含 `file_id`、`fingerprint` 幂等指纹、`paragraphs` 段落结构、`page_map` 页码映射）。
+
+#### 4.1.2 `AIsavefile.py` —— AI 结构化加工 + 双层存储 + 三级索引
+
+**职责边界**：接收 `FileRaw`，执行 AI 加工、分片、归档、索引写入，**不做文件 IO**。
+
+核心流程：
+1. **项目分级**（两种模式）：
+   - `folder` 模式：一级子目录名 = 项目名
+   - `auto` 模式：AI 自动聚类零散文件到项目
+2. **AI 加工**：调用 DeepSeek 生成：
+   - 文件摘要（≤300 字）
+   - 关键词（3~8 个）
+   - 内容类型识别
+3. **文本分片**（`chunk_text`）：
+   - 按字符长度切分（`CHUNK_MAX_CHARS=1000`）
+   - 保留段落边界，相邻分片重叠 100 字
+   - 超长段落单独切分，表格/代码块尽量整体保留
+4. **双层存储**：
+   - **MySQL 主存**：`projects` / `files` / `chunks` 三张表
+   - **磁盘侧录**：归档原始文件 + 同名 `.meta.json`（含分片文本，可独立重建索引）
+5. **三级索引**：项目索引 → 文件索引 → 分片向量索引（Redis）
+
+#### 4.1.3 `storage.py` —— 存储门面
+
+```
+MySQL  = 主存：项目索引 + 文件索引 + 分片文本（真相源）
+磁盘   = 已处理文件夹：原始文件 + .meta.json 侧录（备份/可移植）
+Redis  = 语义分片向量库（可从 MySQL 重建）
+```
+
+关键类与方法：
+- `MySQLIndex`：CRUD `projects`/`files`/`chunks`，含连接保活（`ping(reconnect=True)`）
+- `VectorStore`：封装 `RedisVectorStore`，`add_chunks()` 写入向量，`search()` 语义检索
+- `Storage`：统一门面，提供 `fix_stale_abs_paths()`（修复归档路径）、`rebuild_index()`（从 MySQL 重建 Redis 向量）、`import_from_disk()`（灾备导入）、`validate_index()`（一致性校验）
+
+#### 4.1.4 `pipeline.py` —— 端到端流转入口
+
+```
+未处理/  →  loadfile  →  AIsavefile（AI加工+归档+索引）  →  已处理/
+                                                         ↘ 失败 → 未处理/.failed/
+```
+
+提供 CLI 子命令：`process` / `rebuild` / `import` / `validate` / `failed` / `retry`。
+
+### 4.2 向量检索 (`AIchat/RedisRAG/`)
+
+- `ragconfig.py`：封装 `OllamaEmbeddings(bge-m3:latest)`
+- `RedisRAG.py`：`RedisVectorStore` 初始化，提供 `add_texts` / `similarity_search_with_score`
+
+向量格式：1024 维 float32，以二进制 blob 存储于 Redis Hash 的 `embedding` 字段，配合 RediSearch 向量索引实现近似最近邻检索。
+
+### 4.3 LangGraph 智能体 (`AIchat/graphchat/`)
+
+基于 `StateGraph` 构建的**带记忆压缩 + MCP 工具调用**的对话 Agent。
+
+#### 状态定义 (`GraphState`)
+
+```python
+messages: Annotated[list, add_messages]      # 工作记忆：窗口内完整对话
+summary_list: Annotated[list, append_reducer] # 情节记忆：历史摘要列表
+```
+
+#### 图节点流程
+
+```
+START → memory_compress → call_llm → (tools_condition?) → call_mcp_tool → call_llm → ... → END
+```
+
+1. **`memory_compress`（记忆压缩节点）**：
+   - 按用户轮次分组，超过 `WINDOW_ROUNDS=10` 轮时压缩旧轮次
+   - 旧轮次转纯文本 → LLM 生成摘要 → append 到 `summary_list`
+   - 摘要列表超过 `SUMMARY_MERGE_THRESHOLD=20` 条时，合并最早的几条为一条总摘要（防膨胀）
+   - 重构 `messages` = `[摘要 SystemMessage] + 最近 10 轮原始消息`
+2. **`call_llm`（LLM 推理节点）**：注入基础系统提示 + 绑定 MCP 工具，调用模型
+3. **`call_mcp_tool`（工具执行节点）**：`ToolNode` 执行工具调用，异常时生成错误 `ToolMessage` 保证链路闭环
+
+#### MCP 工具集成 (`AIchat/MCPcall/`)
+
+- `mcpcall.py`：`MultiServerMCPClient` 连接 MCP Server，`get_langchain_tools()` 返回 LangChain 兼容工具列表
+- `MCPmanager.py`：MCP 连接配置的保存/查看（支持 HTTP / SSE / stdio transport）
+- 支持同时接入多个 MCP Server，工具合并后统一注入 Agent
+
+### 4.4 聊天持久化 (`webapis/chat_storage.py`)
+
+MySQL 存储对话历史，服务重启不丢失：
+- `chat_sessions`：`session_id`、`title`、`created_at`、`updated_at`
+- `chat_messages`：`session_id`、`role`、`content`（LONGTEXT）、`tool_calls`（JSON）
+
+重启时从 MySQL 重建对话上下文，通过 `update_state()` 恢复 LangGraph 状态。
+
+### 4.5 Web API (`webapis/app.py`)
+
+FastAPI 应用，主要接口分组：
+
+| 分组 | 接口 | 功能 |
+|------|------|------|
+| 收件箱 | `POST /api/ingest/upload` | 上传文件到未处理区 |
+| | `POST /api/ingest/process` | 触发全流程入库 |
+| | `GET /api/inbox/files` | 列出未处理文件 |
+| 索引 | `POST /api/index/rebuild` | 重建 Redis 向量库 |
+| | `POST /api/index/import` | 从磁盘灾备导入 MySQL |
+| | `GET /api/index/validate` | 索引一致性校验 |
+| | `GET /api/index/stats` | 统计信息 |
+| 检索 | `GET /api/search?q=` | 全库语义检索 |
+| | `GET /api/search/tool` | 供 MCP 工具调用的检索 |
+| 对话 | `GET/POST /api/chat/*` | 会话列表/消息/发送/删除 |
+| MCP | `GET/POST/DELETE /api/mcp/*` | MCP 服务增删查 |
+| 文件 | `GET /api/projects` | 项目列表 |
+| | `GET /api/projects/{pid}/files` | 项目下文件 |
+| | `GET /api/files/{fid}/chunks` | 文件分片详情 |
+
+CORS 全开，支持跨域；前端静态文件由 FastAPI 直接托管（`/` → `web/index.html`）。
+
+### 4.6 前端 (`web/`)
+
+原生 HTML/CSS/JS 单页应用，无构建步骤：
+- `index.html` + `css/style.css`
+- `js/api.js`：API 封装层（相对路径，自动适配访问主机）
+- `js/app.js`、`chat.js`、`documents.js`、`search.js`、`system.js`：各功能模块
+
+---
+
+## 五、数据流转全链路
+
+```
+1. 用户上传文件 → 未处理/
+2. process_inbox() 扫描 → loadfile() 解析为 FileRaw
+3. AIsavefile()：
+   a. AI 生成摘要/关键词
+   b. chunk_text() 分片
+   c. 归档原始文件到 已处理/{项目名}/
+   d. 写入 .meta.json 侧录
+   e. upsert 到 MySQL projects/files/chunks
+   f. 写入 Redis 向量索引
+4. 用户提问 → LangGraph Agent：
+   a. memory_compress 压缩历史
+   b. call_llm 决定是否调用工具
+   c. call_mcp_tool 执行（检索/数据库操作/文档生成等）
+   d. 循环直到给出最终回答
+5. 对话消息持久化到 MySQL chat_messages
+```
+
+---
+
+## 六、关键设计特性
+
+1. **真相源分离**：MySQL（主存）+ 磁盘 `.meta.json`（侧录）+ Redis（可重建缓存），任何一层丢失都可恢复。
+2. **幂等入库**：基于 `fingerprint`（文件名+大小+修改时间）跳过已处理文件。
+3. **路径无关部署**：所有路径基于 `config.py` 的 `__file__` 解析，复制到任意位置即可运行。
+4. **乱码防护**：`.doc` 解析后做质量检测，二进制垃圾不入库。
+5. **长对话记忆管理**：滑动窗口 + 增量摘要 + 摘要合并，避免上下文无限膨胀。
+6. **多 MCP 聚合**：可同时接入多个 MCP Server，工具统一注入 Agent。
+
+---
+
+## 七、目录结构
+
+```
+knowledge-agent/
+├── config.py                  # 统一配置（单源真相，支持环境变量覆盖）
+├── .env.example               # 环境变量模板：复制成 .env 填真实值
+├── requirements.txt
+├── start.bat / start.sh       # 启动脚本
+├── README.md                  # 本文档
+├── test_dual_folder.py        # 入库流水线端到端测试（5 个用例，mock 掉 LLM）
+├── import_test_data.py        # Redis 业务测试数据导入
+├── _clean_db.py               # 清理空项目与残留分片
+├── web/                       # 前端静态文件
+│   ├── index.html
+│   ├── css/style.css
+│   └── js/*.js
+├── webapis/
+│   ├── app.py                 # FastAPI 主应用
+│   └── chat_storage.py        # 聊天持久化
+└── AIchat/
+    ├── deal_files/            # 文件入库流水线
+    │   ├── loadfile.py        # 文件解析
+    │   ├── AIsavefile.py      # AI 加工 + 存储
+    │   ├── storage.py         # MySQL + Redis + 磁盘门面
+    │   ├── pipeline.py        # 端到端入口
+    │   ├── models.py          # 数据结构
+    │   └── config.py          # 配置重导出
+    ├── RedisRAG/              # 向量检索
+    ├── graphchat/             # LangGraph Agent
+    ├── Chat/                  # LLM 封装
+    └── MCPcall/               # MCP 客户端
+```
+
+`deal_files_data/`（未处理 / 已处理 / .failed）是**运行时数据目录**，
+首次启动由 `config.ensure_dirs()` 自动创建，已在 `.gitignore` 里，不入库。
+
+---
+
+## 八、配置说明（`config.py`）
+
+连接信息与密钥**全部支持环境变量覆盖**，仓库里不放任何真实凭据。
+复制 `.env.example` 成 `.env` 填自己的值即可；不带 `.env` 也能跑（每项都有默认值），
+只有 `KB_LLM_API_KEY` 必须自己给。
+
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|--------|----------|--------|------|
+| `WEBAPI_HOST/PORT` | `KB_WEBAPI_HOST` / `KB_WEBAPI_PORT` | `0.0.0.0:8000` | Web 服务地址（已支持局域网） |
+| `MYSQL_HOST/PORT/USER/DATABASE` | `KB_MYSQL_*` | `127.0.0.1:3306/deal_files` | MySQL 主存 |
+| `MYSQL_PASSWORD` | `KB_MYSQL_PASSWORD` | 空 | MySQL 口令 |
+| `REDIS_URL` | `KB_REDIS_URL` | `redis://127.0.0.1:6379` | 向量库 |
+| `EMBEDDING_MODEL` | `KB_EMBEDDING_MODEL` | `bge-m3:latest` | Ollama 嵌入模型 |
+| `EMBEDDING_BASE_URL` | `KB_EMBEDDING_BASE_URL` | `http://localhost:11434` | Ollama 地址 |
+| `LLM_API_KEY` | `KB_LLM_API_KEY` | 空 | **必须自行提供** |
+| `LLM_BASE_URL` | `KB_LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容端点 |
+| `LLM_MODEL` | `KB_LLM_MODEL` | `deepseek-chat` | 对话/摘要模型 |
+| `MCP_URL` | `KB_MCP_URL` | `http://127.0.0.1:8889/mcp` | 默认 MCP 服务 |
+| `CHUNK_MAX_CHARS` | — | `1000` | 分片最大字符数 |
+| `MAX_FILE_SIZE` | — | `50MB` | 单文件大小上限 |
+
+---
+
+## 九、运行方式
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 确保 MySQL、Redis、Ollama 已启动
+
+# 3. 启动 Web 服务
+python -m webapis.app
+# 或
+uvicorn webapis.app:app --host 0.0.0.0 --port 8000
+
+# 4. 访问
+# 本机：http://127.0.0.1:8000
+# 局域网：http://<本机IP>:8000
+# 接口文档：http://127.0.0.1:8000/docs
+```
+
+`start.bat` / `start.sh` 会自动找 `.venv`、缺了就建并装依赖，再拉起服务。
+
+---
+
+## 十、测试
+
+`test_dual_folder.py` 是入库全链路的端到端测试，5 个用例覆盖：完整入库流程、
+索引全量重建、索引一致性校验、幂等去重、失败文件隔离。LLM 调用被 mock 掉，
+**不需要真的配 API Key**，但需要 MySQL 和 Redis 在跑。
+
+```bash
+python test_dual_folder.py
+```
+
+---
+
+## 许可
+
+[MIT License](LICENSE)。
+
