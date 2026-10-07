@@ -4,7 +4,7 @@ webapis FastAPI 应用
 封装 deal_files 的入库、索引、检索能力，供 Web 前端调用。
 
 启动（在项目根目录执行）：
-    uvicorn total_file.webapis.app:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn webapis.app:app --host 0.0.0.0 --port 8000 --reload
 
 接口文档：
     http://127.0.0.1:8000/docs
