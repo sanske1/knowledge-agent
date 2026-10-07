@@ -6,8 +6,8 @@
 项目根目录 = 本文件所在目录
 所有路径均基于 __file__ 解析，不依赖 CWD，复制到任意位置均可运行。
 
-所有**连接信息与密钥**均可用环境变量覆盖，仓库里不存任何真实凭据。
-可覆盖的变量见 README「配置」一节，或 .env.example。
+注意：本仓库不存放任何真实凭据。数据库口令与 LLM 密钥从环境变量读取，
+见下方 MYSQL_PASSWORD / LLM_API_KEY 两处。
 """
 import os
 
@@ -24,12 +24,12 @@ FAILED_DIR = os.path.join(INBOX_DIR, ".failed")
 WEB_DIR = os.path.join(PROJECT_ROOT, "web")
 
 # ==================== MySQL 主存配置 ====================
-MYSQL_HOST = os.environ.get("KB_MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = int(os.environ.get("KB_MYSQL_PORT", "3306"))
-MYSQL_USER = os.environ.get("KB_MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("KB_MYSQL_PASSWORD", "")
-MYSQL_DATABASE = os.environ.get("KB_MYSQL_DATABASE", "deal_files")
-MYSQL_CHARSET = os.environ.get("KB_MYSQL_CHARSET", "utf8mb4")
+MYSQL_HOST = "127.0.0.1"
+MYSQL_PORT = 3306
+MYSQL_USER = "root"
+MYSQL_PASSWORD = os.environ.get("KB_MYSQL_PASSWORD", "")   # 口令走环境变量，不进仓库
+MYSQL_DATABASE = "deal_files"
+MYSQL_CHARSET = "utf8mb4"
 
 
 def get_mysql_config() -> dict:
@@ -44,30 +44,29 @@ def get_mysql_config() -> dict:
 
 
 # ==================== Redis 向量库配置 ====================
-REDIS_URL = os.environ.get("KB_REDIS_URL", "redis://127.0.0.1:6379")
-VECTOR_INDEX_PREFIX = os.environ.get("KB_VECTOR_INDEX_PREFIX", "deal_files_chunks")
+REDIS_URL = "redis://127.0.0.1:6379"
+VECTOR_INDEX_PREFIX = "deal_files_chunks"
 
 
 # ==================== Ollama 嵌入模型配置 ====================
-EMBEDDING_MODEL = os.environ.get("KB_EMBEDDING_MODEL", "bge-m3:latest")
-EMBEDDING_BASE_URL = os.environ.get("KB_EMBEDDING_BASE_URL", "http://localhost:11434")
+EMBEDDING_MODEL = "bge-m3:latest"
+EMBEDDING_BASE_URL = "http://localhost:11434"
 
 
 # ==================== LLM 大模型配置 ====================
-# 密钥从环境变量读，仓库里不放明文；本地开发在 .env.example 的基础上建 .env
-LLM_API_KEY = os.environ.get("KB_LLM_API_KEY", "")
-LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "https://api.deepseek.com")
-LLM_MODEL = os.environ.get("KB_LLM_MODEL", "deepseek-chat")
+LLM_API_KEY = os.environ.get("KB_LLM_API_KEY", "")          # 密钥走环境变量，不进仓库
+LLM_BASE_URL = "https://api.deepseek.com"
+LLM_MODEL = "deepseek-v4-flash"
 
 
 # ==================== MCP 连接配置 ====================
 # MCP 服务器由用户自行搭建，在此填写默认 MCP 服务地址（也可通过 /api/mcp/add 动态添加）
-MCP_URL = os.environ.get("KB_MCP_URL", "http://127.0.0.1:8889/mcp")
+MCP_URL = "http://127.0.0.1:8889/mcp"
 
 
 # ==================== WebAPI 服务配置 ====================
-WEBAPI_HOST = os.environ.get("KB_WEBAPI_HOST", "0.0.0.0")
-WEBAPI_PORT = int(os.environ.get("KB_WEBAPI_PORT", "8000"))
+WEBAPI_HOST = "0.0.0.0"
+WEBAPI_PORT = 8000
 
 
 # ==================== 文件处理配置 ====================

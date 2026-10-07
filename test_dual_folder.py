@@ -6,14 +6,15 @@ import sys
 import json
 import shutil
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from unittest.mock import patch, MagicMock
 from AIchat.deal_files import (
     process_inbox, rebuild_index, validate_index, list_failed,
 )
-from AIchat.deal_files.config import INBOX_DIR, ARCHIVED_DIR, FAILED_DIR
+from AIchat.deal_files.config import INBOX_DIR, ARCHIVED_DIR, FAILED_DIR, SQLITE_DB_PATH
 from AIchat.deal_files.storage import Storage
+from AIchat.deal_files.AIsavefile import llm_model
 
 
 def _mock_llm_invoke(messages):
@@ -51,6 +52,9 @@ def setup_test_files():
     for d in [INBOX_DIR, ARCHIVED_DIR]:
         if os.path.exists(d):
             shutil.rmtree(d)
+    # 清理旧索引 DB（SQLite 已废弃，保留删除以兼容）
+    if os.path.exists(SQLITE_DB_PATH):
+        os.remove(SQLITE_DB_PATH)
     # 清空 MySQL 主存
     from AIchat.deal_files.storage import Storage
     s = Storage()
